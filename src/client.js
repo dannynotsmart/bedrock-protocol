@@ -12,27 +12,31 @@ const LoginVerify = require('./handshake/loginVerify')
 const debugging = false
 
 class Client extends Connection {
-  // The RakNet connection
-  connection
+  /**
+   * Optionally, you can make this configurable via options.deferPlayStatus
+   * @param {{ version: number, host: string, port: number, deferPlayStatus?: boolean }} options
+   */
+  constructor(options) {
+    super();
+    this.options = { ...Options.defaultOptions, ...options };
+    // Custom flags for Hive compatibility
+    this._deferPlayStatus = !!this.options.deferPlayStatus;
+    this._playStatusPending = false;
+    this._receivedStartGame = false;
 
-  /** @param {{ version: number, host: string, port: number }} options */
-  constructor (options) {
-    super()
-    this.options = { ...Options.defaultOptions, ...options }
-
-    this.startGameData = {}
-    this.clientRuntimeId = null
+    this.startGameData = {};
+    this.clientRuntimeId = null;
     // Start off without compression on 1.19.30, zlib on below
-    this.compressionAlgorithm = this.versionGreaterThanOrEqualTo('1.19.30') ? 'none' : 'deflate'
-    this.compressionThreshold = 512
-    this.compressionLevel = this.options.compressionLevel
-    this.batchHeader = 0xfe
+    this.compressionAlgorithm = this.versionGreaterThanOrEqualTo('1.19.30') ? 'none' : 'deflate';
+    this.compressionThreshold = 512;
+    this.compressionLevel = this.options.compressionLevel;
+    this.batchHeader = 0xfe;
 
     if (isDebug) {
-      this.inLog = (...args) => debug('C ->', ...args)
-      this.outLog = (...args) => debug('C <-', ...args)
+      this.inLog = (...args) => debug('C ->', ...args);
+      this.outLog = (...args) => debug('C <-', ...args);
     }
-    this.conLog = this.options.conLog === undefined ? console.log : this.options.conLog
+    this.conLog = this.options.conLog === undefined ? console.log : this.options.conLog;
 
     if (!options.delayedInit) {
       this.init()
@@ -166,17 +170,28 @@ class Client extends Connection {
     this.close()
   }
 
-  onPlayStatus (statusPacket) {
+  // Send play_status packet, optionally deferring until after start_game if required
+  sendPlayStatus(status = 'login_success') {
+    if (this._deferPlayStatus && !this._receivedStartGame) {
+      // Defer sending until start_game is received
+      this._playStatusPending = status;
+      return;
+    }
+    this.write('play_status', { status });
+    this._playStatusPending = false;
+  }
+
+  onPlayStatus(statusPacket) {
     if (this.status === ClientStatus.Initializing && this.options.autoInitPlayer === true) {
       if (statusPacket.status === 'player_spawn') {
-        this.status = ClientStatus.Initialized
+        this.status = ClientStatus.Initialized;
         if (!this.entityId) {
           // We need to wait for start_game in the rare event we get a player_spawn before start_game race condition
-          this.on('start_game', () => this.write('set_local_player_as_initialized', { runtime_entity_id: this.entityId }))
+          this.on('start_game', () => this.write('set_local_player_as_initialized', { runtime_entity_id: this.entityId }));
         } else {
-          this.write('set_local_player_as_initialized', { runtime_entity_id: this.entityId })
+          this.write('set_local_player_as_initialized', { runtime_entity_id: this.entityId });
         }
-        this.emit('spawn')
+        this.emit('spawn');
       }
     }
   }
@@ -241,7 +256,12 @@ class Client extends Connection {
         this.onDisconnectRequest(des.data.params)
         break
       case 'start_game':
-        this.startGameData = pakData.params
+        this.startGameData = pakData.params;
+        this._receivedStartGame = true;
+        // If play_status was deferred and is pending, send it now
+        if (this._playStatusPending) {
+          this.sendPlayStatus(this._playStatusPending);
+        }
         // fallsthrough
       case 'item_registry': // 1.21.60+ send itemstates in item_registry packet
         pakData.params.itemstates?.forEach(state => {
